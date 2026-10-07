@@ -1,0 +1,42 @@
+
+
+# Gradle
+.gradle/
+build/
+**/build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+*.ipr
+*.iws
+local.properties
+
+# 本地签名配置（绝对不能提交）
+keystore.jks
+*.keystore
+*.jks
+signing.properties
+
+# gomobile 生成产物（由 CI 自动生成，不手动提交）
+libs/*.aar
+libs/*.jar
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log
+
+# NDK/CMake 临时文件
+.externalNativeBuild/
+.cxx/
+
+# Go 构建缓存（本地不提交）
+core-go/core.aar
+tun2socks-go/tun2socks.aar
+
+# Kotlin 增量编译缓存
+**/*.kotlin_module

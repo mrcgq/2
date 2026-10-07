@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 纯 Jetpack Compose 项目的标准系统主题 -->
+    <style name="Theme.XlinkAndroid" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">@color/xlink_primary_dark</item>
+        <item name="android:navigationBarColor">@color/surface</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+
+    <!-- 启动画面主题（避免白屏） -->
+    <style name="Theme.XlinkAndroid.Splash" parent="Theme.XlinkAndroid">
+        <item name="android:windowBackground">@color/xlink_primary</item>
+        <item name="android:windowFullscreen">false</item>
+    </style>
+</resources>
