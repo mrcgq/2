@@ -71,7 +71,6 @@ fun SettingsScreen(
                     AppFilterManager.setEnabled(context, enabled)
                     perAppProxyEnabled = enabled
 
-                    // 运行时修改自动热重载 TUN 网卡
                     if (VpnStateHolder.isAnyRunning()) {
                         val restartIntent = Intent(context, XlinkVpnService::class.java).apply {
                             action = XlinkVpnService.ACTION_RESTART_TUN
