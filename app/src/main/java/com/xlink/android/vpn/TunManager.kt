@@ -72,7 +72,7 @@ class TunManager(private val context: Context) {
 
     private fun createTProxyConfig(socks5Port: Int): File {
         val configFile = File(context.cacheDir, "tproxy.conf")
-        val tmpFile = File(context.cacheDir, "tproxy.conf.tmp")
+        if (configFile.exists()) configFile.delete()
 
         val configYaml = """
             misc:
@@ -91,14 +91,10 @@ class TunManager(private val context: Context) {
               cache-size: 10000
         """.trimIndent()
 
-        FileOutputStream(tmpFile).use { fos ->
+        FileOutputStream(configFile).use { fos ->
             fos.write(configYaml.toByteArray(Charsets.UTF_8))
             fos.fd.sync()
         }
-        if (configFile.exists()) {
-            configFile.delete()
-        }
-        tmpFile.renameTo(configFile)
         return configFile
     }
 
