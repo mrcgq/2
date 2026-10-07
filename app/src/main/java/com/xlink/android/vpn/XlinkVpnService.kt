@@ -7,6 +7,10 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
 import android.os.IBinder
@@ -22,10 +26,14 @@ import com.xlink.android.util.AppFilterManager
 import com.xlink.android.util.PortFinder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.Locale
 
 class XlinkVpnService : VpnService() {
 
@@ -61,16 +69,33 @@ class XlinkVpnService : VpnService() {
     @Volatile
     private var activeNodeId: String? = null
 
+    @Volatile
+    private var activeNodeName: String = "Xlink"
+
+    // ── 网络自愈核心状态 ──────────────────────────────────────────
+    private var connectivityManager: ConnectivityManager? = null
+    private var networkHandoverCallback: ConnectivityManager.NetworkCallback? = null
+    private var lastUnderlyingNetwork: Network? = null
+    private var lastHandoverTimestamp: Long = 0L
+
+    // ── 实时网速监控状态 ──────────────────────────────────────────
+    private var statsJob: Job? = null
+    private var lastRxBytes: Long = 0L
+    private var lastTxBytes: Long = 0L
+
     override fun onCreate() {
         super.onCreate()
         nodeStore = NodeStore(applicationContext)
         CoreEngine.setProtectCallback { fd -> protect(fd) }
         createNotificationChannel()
         VpnStateHolder.resetAll()
+
+        connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        registerNetworkHandoverListener()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(NOTIFICATION_ID, buildNotification("Xlink 正在连接..."))
+        startForeground(NOTIFICATION_ID, buildNotification("Xlink 正在连接...", "准备建立安全隧道"))
 
         when (intent?.action) {
             ACTION_START_NODE -> {
@@ -118,6 +143,8 @@ class XlinkVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        unregisterNetworkHandoverListener()
+        stopStatsMonitor()
         try { tunManager?.stopSync() } catch (_: Exception) {}
         tunManager = null
         try { tunPfd?.close() } catch (_: Exception) {}
@@ -154,6 +181,7 @@ class XlinkVpnService : VpnService() {
 
             if (activeNodeId != null) stopCurrentRunningLocked()
             VpnStateHolder.setStarting(nodeId, node.name)
+            activeNodeName = node.name
 
             try {
                 val (configuredHost, configuredPort) = NodeConfig.parseListenAddr(node.listen)
@@ -179,7 +207,9 @@ class XlinkVpnService : VpnService() {
                 activeNodeId = nodeId
                 VpnStateHolder.registerEngine(EngineHandle(nodeId = nodeId, tunStarted = true, internalPort = socksPort))
                 VpnStateHolder.setRunning(nodeId, node.name, socksPort)
-                updateNotification("Xlink 运行中 · 节点: ${node.name}")
+
+                // 启动实时网速与流量轮询
+                startStatsMonitor(node.name)
 
             } catch (e: Exception) {
                 val errMsg = e.message ?: "未知异常"
@@ -191,6 +221,7 @@ class XlinkVpnService : VpnService() {
     }
 
     private suspend fun stopCurrentRunningLocked() {
+        stopStatsMonitor()
         val runningId = activeNodeId
         if (runningId != null) {
             VpnStateHolder.emitLog(runningId, "Xlink", "正在关闭连接...", LogLevel.INFO)
@@ -245,6 +276,123 @@ class XlinkVpnService : VpnService() {
         }
     }
 
+    // ── 第一项：网络切换自愈引擎 (消灭 Wi-Fi/5G 切换假死) ──────────────────
+    private fun registerNetworkHandoverListener() {
+        val cm = connectivityManager ?: return
+        networkHandoverCallback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                inspectAndHealNetwork(network)
+            }
+
+            override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+                // 关键防死锁：严格忽略 VPN 自身接口产生的网络事件
+                if (networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return
+                if (networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+                    inspectAndHealNetwork(network)
+                }
+            }
+
+            override fun onLost(network: Network) {
+                if (network == lastUnderlyingNetwork) {
+                    lastUnderlyingNetwork = null
+                }
+            }
+        }
+
+        try {
+            val request = NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN) // 严格排除虚拟网卡
+                .build()
+            cm.registerNetworkCallback(request, networkHandoverCallback!!)
+        } catch (e: Exception) {
+            Log.w(TAG, "注册网络自愈监听失败: ${e.message}")
+        }
+    }
+
+    private fun unregisterNetworkHandoverListener() {
+        val cm = connectivityManager ?: return
+        val cb = networkHandoverCallback ?: return
+        try {
+            cm.unregisterNetworkCallback(cb)
+        } catch (_: Exception) {}
+        networkHandoverCallback = null
+    }
+
+    private fun inspectAndHealNetwork(newNetwork: Network) {
+        val runningId = activeNodeId ?: return
+        if (!VpnStateHolder.isAnyRunning()) return
+
+        val now = System.currentTimeMillis()
+        // 2.5 秒物理防抖，防止基站瞬态乒乓漫游
+        if (newNetwork == lastUnderlyingNetwork && (now - lastHandoverTimestamp) < 3000L) return
+        if ((now - lastHandoverTimestamp) < 2500L) return
+
+        lastUnderlyingNetwork = newNetwork
+        lastHandoverTimestamp = now
+
+        Log.i(TAG, "检测到物理网络漫游变更，执行毫秒级后台静默自愈...")
+        VpnStateHolder.emitLog(runningId, "系统", "网络环境变化，已触发自愈重连...", LogLevel.INFO)
+
+        serviceScope.launch {
+            stopCurrentRunningLocked()
+            startSingleNode(runningId)
+        }
+    }
+
+    // ── 第二项：通知栏实时网速与累计流量引擎 ───────────────────────────
+    private fun startStatsMonitor(nodeName: String) {
+        statsJob?.cancel()
+        lastRxBytes = 0L
+        lastTxBytes = 0L
+
+        statsJob = serviceScope.launch {
+            while (isActive) {
+                delay(1000L)
+                if (!VpnStateHolder.isAnyRunning() || activeNodeId == null) break
+
+                try {
+                    val stats = TProxyService.TProxyGetStats()
+                    if (stats != null && stats.size >= 2) {
+                        val currentRx = stats[0]
+                        val currentTx = stats[1]
+
+                        val rxSpeed = if (lastRxBytes > 0 && currentRx >= lastRxBytes) currentRx - lastRxBytes else 0L
+                        val txSpeed = if (lastTxBytes > 0 && currentTx >= lastTxBytes) currentTx - lastTxBytes else 0L
+
+                        lastRxBytes = currentRx
+                        lastTxBytes = currentTx
+
+                        val speedText = "↑ ${formatSpeed(txSpeed)}  ↓ ${formatSpeed(rxSpeed)} · 已用: ${formatBytes(currentRx + currentTx)}"
+                        updateNotification("节点: $nodeName", speedText)
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "读取网速异常: ${e.message}")
+                }
+            }
+        }
+    }
+
+    private fun stopStatsMonitor() {
+        statsJob?.cancel()
+        statsJob = null
+    }
+
+    private fun formatSpeed(bytesPerSec: Long): String {
+        return when {
+            bytesPerSec < 1024 -> "$bytesPerSec B/s"
+            bytesPerSec < 1024 * 1024 -> String.format(Locale.US, "%.1f KB/s", bytesPerSec / 1024f)
+            else -> String.format(Locale.US, "%.1f MB/s", bytesPerSec / (1024f * 1024f))
+        }
+    }
+
+    private fun formatBytes(bytes: Long): String {
+        return when {
+            bytes < 1024 * 1024 -> String.format(Locale.US, "%.1f MB", bytes / (1024f * 1024f))
+            else -> String.format(Locale.US, "%.2f GB", bytes / (1024f * 1024f * 1024f))
+        }
+    }
+
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
@@ -260,7 +408,7 @@ class XlinkVpnService : VpnService() {
         }
     }
 
-    private fun buildNotification(contentText: String): Notification {
+    private fun buildNotification(titleText: String, contentText: String): Notification {
         val openIntent = PendingIntent.getActivity(
             this, 0,
             Intent(this, MainActivity::class.java).apply { flags = Intent.FLAG_ACTIVITY_SINGLE_TOP },
@@ -273,18 +421,19 @@ class XlinkVpnService : VpnService() {
         )
 
         return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setContentTitle(getString(R.string.notification_title_running))
+            .setContentTitle(titleText)
             .setContentText(contentText)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentIntent(openIntent)
             .setOngoing(true)
+            .setOnlyAlertOnce(true) // 关键：每秒静默刷新文本，绝对不振动、不响铃、不闪烁
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, getString(R.string.notification_action_stop), stopIntent)
             .build()
     }
 
-    private fun updateNotification(contentText: String) {
-        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        nm.notify(NOTIFICATION_ID, buildNotification(contentText))
+    private fun updateNotification(titleText: String, contentText: String) {
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+        nm?.notify(NOTIFICATION_ID, buildNotification(titleText, contentText))
     }
 }
