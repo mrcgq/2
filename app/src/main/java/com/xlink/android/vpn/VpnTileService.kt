@@ -25,7 +25,6 @@ class VpnTileService : TileService() {
             }
             startService(intent)
         } else {
-            // 防闪退关键：如果系统 VPN 尚未授权，拉起主界面授权，不可盲启
             val prep = VpnService.prepare(this)
             if (prep != null) {
                 val mainIntent = Intent(this, MainActivity::class.java).apply {
