@@ -2,6 +2,9 @@ package com.xlink.android.ui.screen
 
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.os.PowerManager
 import android.provider.Settings
 import android.widget.Toast
 import androidx.compose.foundation.clickable
@@ -23,6 +26,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.xlink.android.R
 import com.xlink.android.util.AppFilterManager
 import com.xlink.android.util.AutoStartManager
@@ -41,13 +47,37 @@ fun SettingsScreen(
     var autoStartEnabled by remember { mutableStateOf(false) }
     var perAppProxyEnabled by remember { mutableStateOf(false) }
     var selectedAppsCount by remember { mutableIntStateOf(0) }
+    var isBatteryOptimizedIgnored by remember { mutableStateOf(false) }
+
     var showAppPicker by remember { mutableStateOf(false) }
     var showAbout by remember { mutableStateOf(false) }
+
+    fun refreshBatteryOptimizationState() {
+        val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+        isBatteryOptimizedIgnored = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && pm != null) {
+            pm.isIgnoringBatteryOptimizations(context.packageName)
+        } else {
+            true
+        }
+    }
+
+    // 监听应用返回前台生命周期，自动刷新电池优化状态
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                refreshBatteryOptimizationState()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     LaunchedEffect(Unit) {
         autoStartEnabled = AutoStartManager.isEnabled(context)
         perAppProxyEnabled = AppFilterManager.isEnabled(context)
         selectedAppsCount = AppFilterManager.getSelectedApps(context).size
+        refreshBatteryOptimizationState()
     }
 
     Scaffold(
@@ -62,6 +92,7 @@ fun SettingsScreen(
         ) {
             SettingsSectionHeader("分流与连接行为")
 
+            // 分应用代理开关
             SettingsSwitchItem(
                 icon = Icons.Filled.Apps,
                 title = "分应用代理 (推荐)",
@@ -90,6 +121,7 @@ fun SettingsScreen(
                 )
             }
 
+            // 开机自启
             SettingsSwitchItem(
                 icon = Icons.Filled.Autorenew,
                 title = stringResource(R.string.settings_autostart),
@@ -98,6 +130,35 @@ fun SettingsScreen(
                 onCheckedChange = { enabled ->
                     if (AutoStartManager.setEnabled(context, enabled)) {
                         autoStartEnabled = enabled
+                    }
+                }
+            )
+
+            // 第三项：后台保活（忽略电池优化引导）
+            SettingsClickItem(
+                icon = Icons.Filled.BatteryChargingFull,
+                title = "后台保活 (忽略电池优化)",
+                subtitle = if (isBatteryOptimizedIgnored) "已加入白名单 (锁屏息屏后防系统休眠断连)" else "未加入白名单 (点击前往授权，防止后台被杀)",
+                onClick = {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        try {
+                            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                                data = Uri.parse("package:${context.packageName}")
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            context.startActivity(intent)
+                        } catch (_: Exception) {
+                            try {
+                                val fallbackIntent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).apply {
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                context.startActivity(fallbackIntent)
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "无法打开系统设置: ${e.message}", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    } else {
+                        Toast.makeText(context, "当前系统版本无需配置电池优化", Toast.LENGTH_SHORT).show()
                     }
                 }
             )
@@ -160,7 +221,7 @@ fun SettingsScreen(
                     Text("Xlink Odyssey Android 豪华增强版")
                     Text("• 核心: hev-socks5-tunnel (纯 C 内存栈)")
                     Text("• 传输: WebSocket over TLS + Nano Header v2")
-                    Text("• 架构: MapDNS (0ms FakeDNS) + 分应用代理")
+                    Text("• 架构: MapDNS (0ms FakeDNS) + 自愈重连")
                 }
             },
             confirmButton = { TextButton(onClick = { showAbout = false }) { Text("确定") } }
