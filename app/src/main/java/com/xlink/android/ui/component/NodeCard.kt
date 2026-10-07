@@ -5,6 +5,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -88,7 +89,7 @@ fun NodeCard(
                 )
             }
 
-            // 测速徽章
+            // 轻量安全测速胶囊
             LatencyBadge(latencyMs = latencyMs, onClick = onPing)
 
             // 运行状态徽章
@@ -133,9 +134,14 @@ fun LatencyBadge(latencyMs: Long?, onClick: () -> Unit) {
         else -> "${latencyMs}ms" to XlinkColors.StatusError
     }
 
-    AssistChip(
-        onClick = onClick,
-        label = { Text(text, fontSize = 10.sp, fontWeight = FontWeight.Medium, color = color) },
-        modifier = Modifier.height(26.dp)
-    )
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(color.copy(alpha = 0.12f))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(text = text, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = color)
+    }
 }
