@@ -2,6 +2,7 @@ package core
 
 import (
 	"bytes"
+	"context"
 	"crypto/md5"
 	"crypto/tls"
 	"encoding/binary"
@@ -30,6 +31,10 @@ type proxySettings struct {
 }
 
 var bufPool = newBufPool(32 * 1024)
+
+// ---------------------------------------------------------------------------------
+// 1. 核心网络选路与分流
+// ---------------------------------------------------------------------------------
 
 func connectNanoTunnel(target string, outboundTag string, payload []byte) (*websocket.Conn, error) {
 	settings, ok := getProxySettings(outboundTag)
@@ -94,6 +99,10 @@ func connectNanoTunnel(target string, outboundTag string, payload []byte) (*webs
 	return wsConn, nil
 }
 
+// ---------------------------------------------------------------------------------
+// 2. Android 套接字保护回调 (防止流量与 DNS 环回进 TUN 虚拟网卡死锁)
+// ---------------------------------------------------------------------------------
+
 func makePreDialControl() func(network, address string, c syscall.RawConn) error {
 	pf := getProtectFunc()
 	if pf == nil {
@@ -101,16 +110,156 @@ func makePreDialControl() func(network, address string, c syscall.RawConn) error
 	}
 	return func(network, address string, c syscall.RawConn) error {
 		_ = c.Control(func(fd uintptr) {
-			// 尝试 protect，即使部分国产 ROM 返回 false 也不中断拨号，因为系统级已排除本应用
 			_ = pf.Protect(int(fd))
 		})
 		return nil
 	}
 }
 
+// ---------------------------------------------------------------------------------
+// 3. Android 原生安全 DNS 解析器 (对齐电脑版：直连公网 DNS + 强制 IPv4 优先)
+// ---------------------------------------------------------------------------------
+
+func safeLookupIP(host string) ([]net.IP, error) {
+	// 如果本身已经是 IP，直接返回
+	if ip := net.ParseIP(host); ip != nil {
+		return []net.IP{ip}, nil
+	}
+
+	// 针对 Android 系统规避 /etc/resolv.conf 缺失问题，使用权威公共 DNS 直连解析
+	publicDNS := []string{
+		"223.5.5.5:53",   // 阿里公共 DNS (国内网络极速)
+		"119.29.29.29:53", // 腾讯公共 DNS
+		"1.1.1.1:53",      // Cloudflare DNS (海外网络极速)
+		"8.8.8.8:53",      // Google DNS
+	}
+
+	var allIPs []net.IP
+	var lastErr error
+
+	for _, dnsServer := range publicDNS {
+		resolver := &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+				d := &net.Dialer{
+					Timeout: 2000 * time.Millisecond,
+					Control: makePreDialControl(), // 保护 DNS UDP 套接字，坚决不循环进 VPN
+				}
+				return d.DialContext(ctx, "udp", dnsServer)
+			},
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
+		ips, err := resolver.LookupIP(ctx, "ip", host)
+		cancel()
+
+		if err == nil && len(ips) > 0 {
+			allIPs = ips
+			break
+		}
+		lastErr = err
+	}
+
+	if len(allIPs) == 0 {
+		if lastErr != nil {
+			return nil, fmt.Errorf("安全 DNS 解析域名 [%s] 失败: %w", host, lastErr)
+		}
+		return nil, fmt.Errorf("未能解析出有效 IP: %s", host)
+	}
+
+	// 强制 IPv4 绝对排在前面，消除移动数据网络的 IPv6 黑洞
+	var v4 []net.IP
+	var v6 []net.IP
+	for _, ip := range allIPs {
+		if ip.To4() != nil {
+			v4 = append(v4, ip)
+		} else {
+			v6 = append(v6, ip)
+		}
+	}
+
+	return append(v4, v6...), nil
+}
+
+// ---------------------------------------------------------------------------------
+// 4. smartDialTCP 智能连接器 (移植自电脑版成功方案，支持域名/IP/端口并自动重试)
+// ---------------------------------------------------------------------------------
+
+func smartDialTCP(targetHostOrIP, defaultPort string, timeout time.Duration) (net.Conn, error) {
+	target := strings.TrimSpace(targetHostOrIP)
+	host := target
+	port := defaultPort
+
+	// 拆解 host 和自定义端口
+	if strings.HasPrefix(target, "[") {
+		if idx := strings.Index(target, "]"); idx != -1 {
+			host = target[1:idx]
+			rest := target[idx+1:]
+			if strings.HasPrefix(rest, ":") && len(rest) > 1 {
+				port = rest[1:]
+			}
+		}
+	} else if strings.Count(target, ":") == 1 {
+		if h, p, err := net.SplitHostPort(target); err == nil {
+			host = h
+			port = p
+		}
+	} else if strings.Count(target, ":") > 1 {
+		host = target
+	}
+
+	netDialer := &net.Dialer{
+		Timeout: timeout,
+		Control: makePreDialControl(),
+	}
+
+	// 1. 如果指定的是纯 IP（例如 172.64.229.28），直接建连
+	if ip := net.ParseIP(host); ip != nil {
+		targetAddr := net.JoinHostPort(host, port)
+		return netDialer.Dial("tcp", targetAddr)
+	}
+
+	// 2. 如果指定的是优选域名（例如 cf.877774.xyz），执行安全解析
+	sortedIPs, err := safeLookupIP(host)
+	if err != nil || len(sortedIPs) == 0 {
+		// 兜底尝试默认拨号
+		targetAddr := net.JoinHostPort(host, port)
+		return netDialer.Dial("tcp", targetAddr)
+	}
+
+	var lastErr error
+	singleTimeout := 3500 * time.Millisecond
+	if singleTimeout > timeout {
+		singleTimeout = timeout
+	}
+
+	// 逐个 IP 尝试建连，任一成功立即返回
+	for _, ip := range sortedIPs {
+		dialerSingle := &net.Dialer{
+			Timeout: singleTimeout,
+			Control: makePreDialControl(),
+		}
+		conn, err := dialerSingle.Dial("tcp", net.JoinHostPort(ip.String(), port))
+		if err == nil {
+			emitLogSafe("SUCCESS", fmt.Sprintf("优选节点建连成功: %s -> %s:%s", host, ip.String(), port))
+			return conn, nil
+		}
+		lastErr = err
+	}
+
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return netDialer.Dial("tcp", net.JoinHostPort(host, port))
+}
+
+// ---------------------------------------------------------------------------------
+// 5. WebSocket 隧道拨号核心
+// ---------------------------------------------------------------------------------
+
 func dialCleanWebSocket(serverAddr, serverIP, fallbackAddr, token string) (*websocket.Conn, error) {
 	var sniHost string
-	var realIP string
+	var realAddr string
 	var realPort string
 
 	cleanServerIP := strings.TrimSpace(serverIP)
@@ -118,7 +267,7 @@ func dialCleanWebSocket(serverAddr, serverIP, fallbackAddr, token string) (*webs
 	parts := strings.SplitN(serverAddr, "#", 2)
 	if len(parts) == 2 {
 		sni := strings.TrimSpace(parts[0])
-		realAddr := strings.TrimSpace(parts[1])
+		poolTarget := strings.TrimSpace(parts[1])
 
 		sh, sp, err := net.SplitHostPort(sni)
 		if err != nil {
@@ -130,34 +279,18 @@ func dialCleanWebSocket(serverAddr, serverIP, fallbackAddr, token string) (*webs
 		}
 
 		if cleanServerIP != "" {
-			realIP = cleanServerIP
+			realAddr = cleanServerIP
 		} else {
-			rh, rp, err := net.SplitHostPort(realAddr)
-			if err != nil {
-				realIP = realAddr
-			} else {
-				realIP = rh
-				realPort = rp
-			}
+			realAddr = poolTarget
 		}
 	} else {
 		host, port, _, _ := parseServerAddr(serverAddr)
 		sniHost = host
 		realPort = port
 		if cleanServerIP != "" {
-			realIP = cleanServerIP
+			realAddr = cleanServerIP
 		} else {
-			realIP = host
-		}
-	}
-
-	if strings.Contains(realIP, ":") && !strings.HasPrefix(realIP, "[") {
-		if strings.Count(realIP, ":") == 1 {
-			h, p, err := net.SplitHostPort(realIP)
-			if err == nil {
-				realIP = h
-				realPort = p
-			}
+			realAddr = host
 		}
 	}
 
@@ -172,16 +305,12 @@ func dialCleanWebSocket(serverAddr, serverIP, fallbackAddr, token string) (*webs
 	reqHeader.Add("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36")
 	reqHeader.Add("Authorization", "Bearer "+token)
 
-	netDialer := &net.Dialer{
-		Timeout: 8 * time.Second,
-		Control: makePreDialControl(),
-	}
-
 	dialer := websocket.Dialer{
 		TLSClientConfig:  &tls.Config{InsecureSkipVerify: true, ServerName: tlsHost},
 		HandshakeTimeout: 10 * time.Second,
 		NetDial: func(network, addr string) (net.Conn, error) {
-			return netDialer.Dial(network, net.JoinHostPort(realIP, realPort))
+			// ★ 彻底解决 cf.877774.xyz 域名不通的问题：交由智能连接器解析并握手
+			return smartDialTCP(realAddr, realPort, 6*time.Second)
 		},
 	}
 
@@ -194,6 +323,10 @@ func dialCleanWebSocket(serverAddr, serverIP, fallbackAddr, token string) (*webs
 	}
 	return conn, nil
 }
+
+// ---------------------------------------------------------------------------------
+// 6. Nano 协议封包与 URL 组装
+// ---------------------------------------------------------------------------------
 
 func sendNanoHeaderV2(wsConn *websocket.Conn, target string, payload []byte, fb string) error {
 	host, portStr, _ := net.SplitHostPort(target)
