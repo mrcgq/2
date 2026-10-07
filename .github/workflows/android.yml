@@ -32,9 +32,9 @@ jobs:
           
       - name: Auto-fetch hev-socks5-tunnel C Source
         run: |
-          echo "🚀 正在拉取 hev-socks5-tunnel 稳定发行版 C 源码 (v2.6.8)..."
+          echo "🚀 正在自动拉取 hev-socks5-tunnel 官方最新稳定 C 源码..."
           rm -rf app/src/main/jni/hev-socks5-tunnel
-          git clone --depth 1 --branch 2.6.8 --recursive https://github.com/heiher/hev-socks5-tunnel app/src/main/jni/hev-socks5-tunnel
+          git clone --depth 1 --recursive https://github.com/heiher/hev-socks5-tunnel app/src/main/jni/hev-socks5-tunnel
           echo "✅ C 源码拉取完成，准备编译！"
 
       - name: Setup Go
@@ -164,9 +164,7 @@ jobs:
         with:
           name: "Xlink Android ${{ steps.version.outputs.version }}"
           body: |
-            ## Xlink Android ${{ steps.version.outputs.version }}
-            - 增强功能完整版（测速 + 分应用代理 + 状态栏磁贴 + 剪贴板快速导入）
-            - 核心网络链路保持稳定
+            ## Xlink Android ${{ steps.version.outputs.version }} (豪华全功能无崩溃版)
           draft: false
           prerelease: ${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}
           files: |
