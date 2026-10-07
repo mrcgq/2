@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 应用基础 -->
+    <string name="app_name">Xlink 客户端</string>
+    <string name="app_version">v14.2 (Odyssey)</string>
+
+    <!-- VPN 清单与特殊用途声明 (Android 14+ 强制) -->
+    <string name="vpn_special_use_description">通过基于 Cloudflare 边缘计算的加密代理隧道保护设备网络流量</string>
+
+    <!-- VPN 前台通知 -->
+    <string name="notification_channel_vpn_name">VPN 服务</string>
+    <string name="notification_channel_vpn_desc">Xlink VPN 正在运行的前台保活通知</string>
+    <string name="notification_title_running">Xlink 正在运行</string>
+    <string name="notification_action_stop">断开连接</string>
+
+    <!-- 兼容别名 (防旧代码引用断裂) -->
+    <string name="notif_channel_id">xlink_vpn_channel</string>
+    <string name="notif_channel_name">VPN 服务</string>
+    <string name="notif_channel_desc">Xlink VPN 正在运行的前台保活通知</string>
+    <string name="notif_title">Xlink 运行中</string>
+    <string name="notif_action_stop">断开</string>
+
+    <!-- 表单字段标签 -->
+    <string name="label_listen">本地监听</string>
+    <string name="label_server">域名池</string>
+    <string name="label_ip">指定 IP</string>
+    <string name="label_token">Token</string>
+    <string name="label_secret_key">Key</string>
+    <string name="label_fallback_ip">回源 IP</string>
+    <string name="label_sub_url">订阅地址</string>
+    <string name="label_routing_mode">路由模式</string>
+    <string name="label_strategy">负载策略</string>
+    <string name="label_rules">分流规则</string>
+
+    <!-- 模式选项 -->
+    <string name="routing_global">全局代理 (经由 Xlink)</string>
+    <string name="routing_smart">智能分流 (国内直连，国外走 Xlink)</string>
+
+    <string name="strategy_random">[Random] 混沌模式 (推荐)</string>
+    <string name="strategy_rr">[RR] 加特林模式 (轮询)</string>
+    <string name="strategy_hash">[Hash] 狙击模式 (会话保持)</string>
+
+    <!-- 对话框文案 -->
+    <string name="dialog_rename_title">重命名节点</string>
+    <string name="dialog_rename_hint">请输入新的节点别名</string>
+    <string name="dialog_delete_confirm_title">确认删除</string>
+    <string name="dialog_delete_confirm_msg">确定要删除选中的节点吗？此操作不可撤销。</string>
+    <string name="dialog_batch_sni_title">批量修改 SNI</string>
+    <string name="dialog_batch_sni_hint">请输入新的 SNI 域名 (如 cdn.worker.dev)</string>
+
+    <!-- 提示与报错信息 -->
+    <string name="err_node_running">请先停止正在运行的节点再执行操作</string>
+    <string name="err_import_invalid">剪贴板内容不是有效的 xlink:// 节点配置</string>
+    <string name="msg_import_success">节点导入成功！</string>
+    <string name="msg_export_success">配置已成功导出至剪贴板！</string>
+
+    <!-- 设置界面 -->
+    <string name="settings_title">系统设置</string>
+    <string name="settings_autostart">开机自启 (当前主用节点)</string>
+    <string name="settings_about">关于 Xlink</string>
+    <string name="settings_about_msg">Xlink Odyssey Android 客户端\n版本：%1$s\n\n专为 Cloudflare Worker + WebSocket 量身定制的隐私加速工具。</string>
+
+    <!-- 导航与通用 -->
+    <string name="nav_home">节点</string>
+    <string name="nav_log">日志</string>
+    <string name="nav_settings">设置</string>
+</resources>
