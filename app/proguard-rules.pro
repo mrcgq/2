@@ -13,9 +13,11 @@
     native <methods>;
 }
 
-# ── VpnService 保护 ──────────────────────────────────────────
+# ── VpnService 与 TileService 保护 (防冷启动闪退) ──────────────
 -keep class com.xlink.android.vpn.XlinkVpnService { *; }
 -keep class com.xlink.android.vpn.XlinkVpnService$* { *; }
+-keep class com.xlink.android.vpn.VpnTileService { *; }
+-keep class com.xlink.android.util.AppFilterManager { *; }
 
 # ── 广播接收器保护 ───────────────────────────────────────────
 -keep class com.xlink.android.receiver.BootReceiver { *; }
