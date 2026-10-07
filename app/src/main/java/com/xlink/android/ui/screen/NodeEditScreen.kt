@@ -104,7 +104,6 @@ fun NodeEditScreen(nodeViewModel: NodeViewModel, onBack: () -> Unit) {
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // 订阅更新快捷操作
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
