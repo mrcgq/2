@@ -1,11 +1,8 @@
-//
-// 修复重点：
-//   1. 结合 VpnStateHolder 动态同步每个节点的 isRunning 实时状态
-//   2. 补齐 HomeScreen 与 NodeEditScreen 所需的全部接口与状态流
-//   3. 消除与不可变 NodeConfig 之间的调用冲突
 package com.xlink.android.viewmodel
 
+import android.content.Context
 import android.util.Log
+import android.widget.Toast
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.xlink.android.data.model.NodeConfig
@@ -13,6 +10,7 @@ import com.xlink.android.data.model.NodeRunState
 import com.xlink.android.data.store.NodeStore
 import com.xlink.android.data.sub.SubRepository
 import com.xlink.android.data.sub.SubResult
+import com.xlink.android.util.ClipboardUtil
 import com.xlink.android.util.UriParser
 import com.xlink.android.vpn.VpnStateHolder
 import kotlinx.coroutines.Dispatchers
@@ -28,13 +26,12 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.net.InetSocketAddress
+import java.net.Socket
 
 sealed class NodeUiEvent {
     data class ShowToast(val message: String) : NodeUiEvent()
     data class ShowError(val message: String) : NodeUiEvent()
-    data class ImportSuccess(val nodeName: String) : NodeUiEvent()
-    data class ImportFailed(val reason: String) : NodeUiEvent()
-    data class ExportSuccess(val uri: String) : NodeUiEvent()
 }
 
 class NodeViewModel(
@@ -55,6 +52,9 @@ class NodeViewModel(
         val idx = _currentIndex.value
         if (idx in list.indices) list[idx] else null
     }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    private val _nodeLatencies = MutableStateFlow<Map<String, Long>>(emptyMap())
+    val nodeLatencies: StateFlow<Map<String, Long>> = _nodeLatencies.asStateFlow()
 
     private val _isBusy = MutableStateFlow(false)
     val isBusy: StateFlow<Boolean> = _isBusy.asStateFlow()
@@ -92,6 +92,68 @@ class NodeViewModel(
         _persistedNodes.value = list
         _currentIndex.value = list.lastIndex
         persistAsync()
+    }
+
+    fun importFromClipboard(context: Context) {
+        val text = ClipboardUtil.paste(context)?.trim()
+        if (text.isNullOrEmpty()) {
+            Toast.makeText(context, "剪贴板为空，无法导入", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val parsedNode = UriParser.parse(text)
+        if (parsedNode != null) {
+            addNewNode(parsedNode)
+            Toast.makeText(context, "成功导入节点: ${parsedNode.name}", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(context, "未识别到有效的 xlink:// 配置", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun exportNode(context: Context, node: NodeConfig) {
+        val uri = UriParser.serialize(node)
+        ClipboardUtil.copy(context, uri)
+        Toast.makeText(context, "已成功复制配置到剪贴板！", Toast.LENGTH_SHORT).show()
+    }
+
+    fun pingNode(node: NodeConfig) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val targetHost = if (node.ip.isNotBlank()) {
+                node.ip.trim()
+            } else {
+                val firstLine = node.server.lineSequence()
+                    .map { it.trim() }
+                    .firstOrNull { it.isNotEmpty() && !it.startsWith("#") } ?: ""
+                val afterHash = if (firstLine.contains('#')) firstLine.substringAfter('#') else firstLine
+                val hostOnly = if (afterHash.startsWith('[')) {
+                    afterHash.substringBefore(']') + "]"
+                } else {
+                    afterHash.substringBefore(':')
+                }
+                hostOnly.trim()
+            }
+
+            if (targetHost.isBlank()) return@launch
+
+            val targetPort = 443
+            val start = System.currentTimeMillis()
+            var latency: Long = -1
+            try {
+                Socket().use { sock ->
+                    sock.connect(InetSocketAddress(targetHost, targetPort), 2500)
+                    latency = System.currentTimeMillis() - start
+                }
+            } catch (_: Exception) {
+                latency = -1
+            }
+            withContext(Dispatchers.Main) {
+                _nodeLatencies.value = _nodeLatencies.value.toMutableMap().apply { put(node.id, latency) }
+            }
+        }
+    }
+
+    fun pingAllNodes() {
+        val list = _persistedNodes.value
+        list.forEach { pingNode(it) }
     }
 
     fun cloneNode(index: Int) {
@@ -140,7 +202,9 @@ class NodeViewModel(
                     updateNode(index) { res.updatedNode }
                     onResult("更新成功！获取到 ${res.nodeCount} 个节点")
                 }
-                is SubResult.Failure -> withContext(Dispatchers.Main) { onResult("更新失败: ${res.reason}") }
+                is SubResult.Failure -> withContext(Dispatchers.Main) {
+                    onResult("更新失败: ${res.reason}")
+                }
             }
             _isBusy.value = false
         }

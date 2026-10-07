@@ -1,5 +1,6 @@
 package com.xlink.android.ui.screen
 
+import android.widget.Toast
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -7,6 +8,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -30,6 +32,7 @@ fun NodeEditScreen(nodeViewModel: NodeViewModel, onBack: () -> Unit) {
     val currentIndex by nodeViewModel.currentIndex.collectAsStateWithLifecycle()
     val nodes by nodeViewModel.nodes.collectAsStateWithLifecycle()
     val node = nodes.getOrNull(currentIndex)
+    val isBusy by nodeViewModel.isBusy.collectAsStateWithLifecycle()
 
     if (node == null) {
         LaunchedEffect(Unit) { onBack() }
@@ -50,7 +53,6 @@ fun NodeEditScreen(nodeViewModel: NodeViewModel, onBack: () -> Unit) {
 
     var showBatchSniDialog by remember { mutableStateOf(false) }
 
-    // 输入改动时防抖自动保存
     LaunchedEffect(
         nameField, listenField, serverField, ipField, tokenField,
         secretKeyField, fallbackIpField, subUrlField, routingModeField, strategyModeField, rulesField
@@ -85,6 +87,7 @@ fun NodeEditScreen(nodeViewModel: NodeViewModel, onBack: () -> Unit) {
                         onClick = {
                             val uri = UriParser.serialize(node)
                             ClipboardUtil.copy(context, uri)
+                            Toast.makeText(context, "已成功复制配置到剪贴板！", Toast.LENGTH_SHORT).show()
                         }
                     ) {
                         Icon(Icons.Filled.ContentCopy, contentDescription = "导出配置")
@@ -101,24 +104,40 @@ fun NodeEditScreen(nodeViewModel: NodeViewModel, onBack: () -> Unit) {
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // 节点别名
-            OutlinedTextField(
-                value = nameField,
-                onValueChange = { nameField = it },
-                label = { Text("节点别名") },
-                modifier = Modifier.fillMaxWidth()
-            )
+            // 订阅更新快捷操作
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("订阅地址 (URL)", fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                    FilledTonalButton(
+                        onClick = {
+                            nodeViewModel.updateSubscription(currentIndex) { msg ->
+                                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        enabled = !isBusy && subUrlField.isNotBlank(),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                        modifier = Modifier.height(32.dp)
+                    ) {
+                        Icon(Icons.Filled.Sync, null, modifier = Modifier.size(14.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(if (isBusy) "更新中..." else "更新订阅", fontSize = 12.sp)
+                    }
+                }
+                OutlinedTextField(
+                    value = subUrlField,
+                    onValueChange = { subUrlField = it },
+                    placeholder = { Text("https://example.com/api/sub") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
 
-            // 本地监听
-            OutlinedTextField(
-                value = listenField,
-                onValueChange = { listenField = it },
-                label = { Text("本地监听地址") },
-                placeholder = { Text("127.0.0.1:10808") },
-                modifier = Modifier.fillMaxWidth()
-            )
+            OutlinedTextField(value = nameField, onValueChange = { nameField = it }, label = { Text("节点别名") }, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(value = listenField, onValueChange = { listenField = it }, label = { Text("本地监听地址") }, placeholder = { Text("127.0.0.1:10808") }, modifier = Modifier.fillMaxWidth())
 
-            // 域名池 + 批量改 SNI 按钮
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -146,76 +165,24 @@ fun NodeEditScreen(nodeViewModel: NodeViewModel, onBack: () -> Unit) {
                 )
             }
 
-            // 指定 IP（优选 IP）
-            OutlinedTextField(
-                value = ipField,
-                onValueChange = { ipField = it },
-                label = { Text("指定 IP (Cloudflare 优选 IP / 反代 IP)") },
-                placeholder = { Text("如: 104.16.88.88 或 xxli.sohasoha.top") },
-                modifier = Modifier.fillMaxWidth()
-            )
+            OutlinedTextField(value = ipField, onValueChange = { ipField = it }, label = { Text("指定 IP (Cloudflare 优选 IP / 反代 IP)") }, placeholder = { Text("如: 104.16.88.88 或 xxli.sohasoha.top") }, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(value = tokenField, onValueChange = { tokenField = it }, label = { Text("Token (协议认证 / UUID)") }, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(value = secretKeyField, onValueChange = { secretKeyField = it }, label = { Text("Key (Worker 鉴权密钥)") }, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(value = fallbackIpField, onValueChange = { fallbackIpField = it }, label = { Text("回源 IP (pyip / Fallback IP)") }, placeholder = { Text("如: 43.162.119.244 (不需固定则留空)") }, modifier = Modifier.fillMaxWidth())
 
-            // Token
-            OutlinedTextField(
-                value = tokenField,
-                onValueChange = { tokenField = it },
-                label = { Text("Token (协议认证 / UUID)") },
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            // Key (Secret Key)
-            OutlinedTextField(
-                value = secretKeyField,
-                onValueChange = { secretKeyField = it },
-                label = { Text("Key (Worker 鉴权密钥)") },
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            // 回源 IP
-            OutlinedTextField(
-                value = fallbackIpField,
-                onValueChange = { fallbackIpField = it },
-                label = { Text("回源 IP (pyip / Fallback IP)") },
-                placeholder = { Text("如: [2602:fc59:11:64::6812:2c00]") },
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            // 路由模式
             Text("路由模式", fontSize = 13.sp, fontWeight = FontWeight.Medium)
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                FilterChip(
-                    selected = routingModeField == NodeConfig.ROUTING_GLOBAL,
-                    onClick = { routingModeField = NodeConfig.ROUTING_GLOBAL },
-                    label = { Text("全局代理 (经由 Xlink)") }
-                )
-                FilterChip(
-                    selected = routingModeField == NodeConfig.ROUTING_SMART,
-                    onClick = { routingModeField = NodeConfig.ROUTING_SMART },
-                    label = { Text("智能分流") }
-                )
+                FilterChip(selected = routingModeField == NodeConfig.ROUTING_GLOBAL, onClick = { routingModeField = NodeConfig.ROUTING_GLOBAL }, label = { Text("全局代理 (经由 Xlink)") })
+                FilterChip(selected = routingModeField == NodeConfig.ROUTING_SMART, onClick = { routingModeField = NodeConfig.ROUTING_SMART }, label = { Text("智能分流") })
             }
 
-            // 负载策略
             Text("负载策略", fontSize = 13.sp, fontWeight = FontWeight.Medium)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(
-                    selected = strategyModeField == NodeConfig.STRATEGY_RANDOM,
-                    onClick = { strategyModeField = NodeConfig.STRATEGY_RANDOM },
-                    label = { Text("[Random] 混沌") }
-                )
-                FilterChip(
-                    selected = strategyModeField == NodeConfig.STRATEGY_RR,
-                    onClick = { strategyModeField = NodeConfig.STRATEGY_RR },
-                    label = { Text("[RR] 轮询") }
-                )
-                FilterChip(
-                    selected = strategyModeField == NodeConfig.STRATEGY_HASH,
-                    onClick = { strategyModeField = NodeConfig.STRATEGY_HASH },
-                    label = { Text("[Hash] 狙击") }
-                )
+                FilterChip(selected = strategyModeField == NodeConfig.STRATEGY_RANDOM, onClick = { strategyModeField = NodeConfig.STRATEGY_RANDOM }, label = { Text("[Random] 混沌") })
+                FilterChip(selected = strategyModeField == NodeConfig.STRATEGY_RR, onClick = { strategyModeField = NodeConfig.STRATEGY_RR }, label = { Text("[RR] 轮询") })
+                FilterChip(selected = strategyModeField == NodeConfig.STRATEGY_HASH, onClick = { strategyModeField = NodeConfig.STRATEGY_HASH }, label = { Text("[Hash] 狙击") })
             }
 
-            // 分流规则
             OutlinedTextField(
                 value = rulesField,
                 onValueChange = { rulesField = it },
@@ -226,11 +193,11 @@ fun NodeEditScreen(nodeViewModel: NodeViewModel, onBack: () -> Unit) {
                 maxLines = 6
             )
 
-            // 导出配置按钮
             Button(
                 onClick = {
                     val uri = UriParser.serialize(node)
                     ClipboardUtil.copy(context, uri)
+                    Toast.makeText(context, "配置已成功导出到剪贴板！", Toast.LENGTH_SHORT).show()
                 },
                 modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
             ) {
@@ -241,7 +208,6 @@ fun NodeEditScreen(nodeViewModel: NodeViewModel, onBack: () -> Unit) {
         }
     }
 
-    // 批量改 SNI 对话框
     if (showBatchSniDialog) {
         InputDialog(
             title = "批量修改 SNI",

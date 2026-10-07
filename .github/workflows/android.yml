@@ -1,4 +1,3 @@
-
 name: Build Xlink Android
 
 on:
@@ -25,19 +24,17 @@ jobs:
     timeout-minutes: 40
 
     steps:
-      # ★ 核心改动：submodules: true 自动拉取 hev-socks5-tunnel 极简 C 源码
       - name: Checkout repository with submodules
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: recursive
           
-      # ★ 让 GitHub Actions 全自动拉取 hev-socks5-tunnel C 源码，免去本地任何手动操作！
       - name: Auto-fetch hev-socks5-tunnel C Source
         run: |
-          echo "🚀 正在自动拉取 hev-socks5-tunnel 官方 C 源码..."
+          echo "🚀 正在拉取 hev-socks5-tunnel 稳定发行版 C 源码 (v2.6.8)..."
           rm -rf app/src/main/jni/hev-socks5-tunnel
-          git clone --depth 1 --recursive https://github.com/heiher/hev-socks5-tunnel app/src/main/jni/hev-socks5-tunnel
+          git clone --depth 1 --branch 2.6.8 --recursive https://github.com/heiher/hev-socks5-tunnel app/src/main/jni/hev-socks5-tunnel
           echo "✅ C 源码拉取完成，准备编译！"
 
       - name: Setup Go
@@ -71,8 +68,6 @@ jobs:
       - name: Prepare libs directory
         run: mkdir -p app/libs
 
-      
-      # ★ 核心改动：全工程只编译单 Go AAR (仅 core.aar)，杜绝双 Runtime 冗余！
       - name: Build core.aar
         working-directory: core-go
         run: |
@@ -99,7 +94,6 @@ jobs:
           distribution: 'temurin'
           cache: 'gradle'
 
-      # ★ 核心兜底：如果本地没提交 gradlew，CI 自动调用预装的 gradle 生成一套
       - name: Ensure Gradle Wrapper exists
         run: |
           if [ ! -f "gradlew" ]; then
@@ -134,7 +128,6 @@ jobs:
             keytool -genkey -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-      # Gradle 会自动通过 ndkBuild 编译 C 源码生成 libhev-socks5-tunnel.so 并打包
       - name: Build Debug APK
         run: |
           ./gradlew assembleDebug \
@@ -171,13 +164,9 @@ jobs:
         with:
           name: "Xlink Android ${{ steps.version.outputs.version }}"
           body: |
-            ## Xlink Android ${{ steps.version.outputs.version }} (纯 C 核心暴瘦版)
-            
-            ### 升级亮点
-            - 彻底剔除 gVisor，改用纯 C 编写的 `hev-socks5-tunnel`。
-            - **安装包体积骤降至 ~6MB**（原 50MB）。
-            - **常驻内存暴降至 ~12MB**（原 85MB）。
-            - 原生支持 **MapDNS (FakeDNS)**，实现 0ms 本地域名秒解析与 0 DNS 泄漏。
+            ## Xlink Android ${{ steps.version.outputs.version }}
+            - 增强功能完整版（测速 + 分应用代理 + 状态栏磁贴 + 剪贴板快速导入）
+            - 核心网络链路保持稳定
           draft: false
           prerelease: ${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}
           files: |

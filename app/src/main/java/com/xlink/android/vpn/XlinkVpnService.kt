@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.Build
 import android.os.IBinder
@@ -17,12 +18,14 @@ import com.xlink.android.data.model.NodeConfig
 import com.xlink.android.data.store.NodeStore
 import com.xlink.android.engine.CoreEngine
 import com.xlink.android.ui.MainActivity
+import com.xlink.android.util.AppFilterManager
 import com.xlink.android.util.PortFinder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 
 class XlinkVpnService : VpnService() {
@@ -35,6 +38,7 @@ class XlinkVpnService : VpnService() {
         const val ACTION_STOP_NODE = "com.xlink.android.STOP_NODE"
         const val ACTION_START_ALL = "com.xlink.android.START_ALL"
         const val ACTION_STOP_ALL = "com.xlink.android.STOP_ALL"
+        const val ACTION_RESTART_TUN = "com.xlink.android.RESTART_TUN"
         const val EXTRA_NODE_ID = "node_id"
 
         const val NOTIFICATION_CHANNEL_ID = "xlink_vpn_channel"
@@ -57,6 +61,8 @@ class XlinkVpnService : VpnService() {
 
     @Volatile
     private var activeNodeId: String? = null
+
+    private val startLock = Mutex()
 
     override fun onCreate() {
         super.onCreate()
@@ -84,6 +90,14 @@ class XlinkVpnService : VpnService() {
                 stopCurrentRunningLocked()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
+            }
+            ACTION_RESTART_TUN -> {
+                val currentId = activeNodeId
+                if (currentId != null) {
+                    serviceScope.launch {
+                        startSingleNode(currentId)
+                    }
+                }
             }
             else -> serviceScope.launch {
                 if (!VpnStateHolder.isAnyRunning() && activeNodeId == null) {
@@ -134,47 +148,55 @@ class XlinkVpnService : VpnService() {
     }
 
     private suspend fun startSingleNode(nodeId: String) {
-        withContext(Dispatchers.IO) {
-            if (activeNodeId == nodeId && VpnStateHolder.isRunning(nodeId)) return@withContext
+        startLock.lock()
+        try {
+            withContext(Dispatchers.IO) {
+                val nodes = nodeStore.loadOnce()
+                val node = nodes.firstOrNull { it.id == nodeId } ?: return@withContext
 
-            val nodes = nodeStore.loadOnce()
-            val node = nodes.firstOrNull { it.id == nodeId } ?: return@withContext
-
-            if (activeNodeId != null) stopCurrentRunningLocked()
-            VpnStateHolder.setStarting(nodeId, node.name)
-
-            try {
-                val (configuredHost, configuredPort) = NodeConfig.parseListenAddr(node.listen)
-                val socksPort = PortFinder.findFree(configuredPort)
-                val listenAddr = "$configuredHost:$socksPort"
-
-                val coreResult = CoreEngine.startNode(node, listenAddr)
-                if (coreResult.isFailure) {
-                    throw coreResult.exceptionOrNull() ?: IllegalStateException("Go 核心引擎启动失败")
+                if (activeNodeId != null) {
+                    try { tunManager?.stopSync() } catch (_: Exception) {}
+                    tunManager = null
+                    try { tunPfd?.close() } catch (_: Exception) {}
+                    tunPfd = null
                 }
+                VpnStateHolder.setStarting(nodeId, node.name)
 
-                VpnStateHolder.emitLog(nodeId, node.name, "正在创建 TUN 虚拟网卡...", LogLevel.INFO)
-                val pfd = establishTun() ?: throw IllegalStateException("TUN 虚拟网卡分配失败")
-                tunPfd = pfd
+                try {
+                    val (configuredHost, configuredPort) = NodeConfig.parseListenAddr(node.listen)
+                    val socksPort = PortFinder.findFree(configuredPort)
+                    val listenAddr = "$configuredHost:$socksPort"
 
-                val tm = TunManager(applicationContext)
-                tm.onError = { err ->
-                    VpnStateHolder.emitLog(nodeId, node.name, "[TUN 异常] $err", LogLevel.ERROR)
+                    val coreResult = CoreEngine.startNode(node, listenAddr)
+                    if (coreResult.isFailure) {
+                        throw coreResult.exceptionOrNull() ?: IllegalStateException("Go 核心引擎启动失败")
+                    }
+
+                    VpnStateHolder.emitLog(nodeId, node.name, "正在创建 TUN 虚拟网卡...", LogLevel.INFO)
+                    val pfd = establishTun() ?: throw IllegalStateException("TUN 虚拟网卡分配失败")
+                    tunPfd = pfd
+
+                    val tm = TunManager(applicationContext)
+                    tm.onError = { err ->
+                        VpnStateHolder.emitLog(nodeId, node.name, "[TUN 异常] $err", LogLevel.ERROR)
+                    }
+                    tm.start(pfd.fd, socksPort)
+                    tunManager = tm
+
+                    activeNodeId = nodeId
+                    VpnStateHolder.registerEngine(EngineHandle(nodeId = nodeId, tunStarted = true, internalPort = socksPort))
+                    VpnStateHolder.setRunning(nodeId, node.name, socksPort)
+                    updateNotification("Xlink 运行中 · 节点: ${node.name}")
+
+                } catch (e: Exception) {
+                    val errMsg = e.message ?: "未知异常"
+                    Log.e(TAG, "启动节点失败: $errMsg", e)
+                    VpnStateHolder.setError(nodeId, node.name, errMsg)
+                    stopCurrentRunningLocked()
                 }
-                tm.start(pfd.fd, socksPort)
-                tunManager = tm
-
-                activeNodeId = nodeId
-                VpnStateHolder.registerEngine(EngineHandle(nodeId = nodeId, tunStarted = true, internalPort = socksPort))
-                VpnStateHolder.setRunning(nodeId, node.name, socksPort)
-                updateNotification("Xlink 运行中 · 节点: ${node.name}")
-
-            } catch (e: Exception) {
-                val errMsg = e.message ?: "未知异常"
-                Log.e(TAG, "启动节点失败: $errMsg", e)
-                VpnStateHolder.setError(nodeId, node.name, errMsg)
-                stopCurrentRunningLocked()
             }
+        } finally {
+            startLock.unlock()
         }
     }
 
@@ -196,18 +218,38 @@ class XlinkVpnService : VpnService() {
 
     private fun establishTun(): ParcelFileDescriptor? {
         return try {
-            Builder()
+            val builder = Builder()
                 .addAddress(TUN_ADDRESS_V4, TUN_PREFIX_V4)
                 .addRoute("0.0.0.0", 0)
                 .addDnsServer(TUN_FAKEDNS_IP)
-                .addRoute("100.64.0.0", 10) // 确保全部 CGNAT FakeIP 流量无缝路由进 TUN 网卡
+                .addRoute("100.64.0.0", 10)
                 .addAddress(TUN_ADDRESS_V6, TUN_PREFIX_V6)
                 .addRoute("::", 0)
                 .setMtu(TUN_MTU)
                 .setBlocking(false)
                 .setSession("Xlink Odyssey")
-                .addDisallowedApplication(packageName)
-                .establish()
+
+            val isPerAppEnabled = AppFilterManager.isEnabled(applicationContext)
+            val selectedApps = AppFilterManager.getSelectedApps(applicationContext)
+
+            if (isPerAppEnabled && selectedApps.isNotEmpty()) {
+                var addedCount = 0
+                for (pkg in selectedApps) {
+                    try {
+                        packageManager.getPackageInfo(pkg, 0)
+                        builder.addAllowedApplication(pkg)
+                        addedCount++
+                    } catch (_: PackageManager.NameNotFoundException) {}
+                }
+                // 关键防闪退兜底：如果设置了白名单但有效 App 为 0，退回全局模式避免 Builder 崩溃
+                if (addedCount == 0) {
+                    builder.addDisallowedApplication(packageName)
+                }
+            } else {
+                builder.addDisallowedApplication(packageName)
+            }
+
+            builder.establish()
         } catch (e: Exception) {
             Log.e(TAG, "establishTun 失败: ${e.message}", e)
             null

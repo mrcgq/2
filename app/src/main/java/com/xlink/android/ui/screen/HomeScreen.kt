@@ -1,14 +1,6 @@
-//
-// 修复重点：
-//   1. 移除误导性的“全部启动”按钮，重构为符合 Android 平台规则的单节点连接模式。
-//   2. 顶部提供全局主开关，列表提供一键切换主用节点。
-//   3. 完全对接修正后的 NodeViewModel 与 strings.xml。
-
 package com.xlink.android.ui.screen
 
-import android.content.Context
 import android.content.Intent
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -16,9 +8,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -27,11 +17,8 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.xlink.android.R
-import com.xlink.android.data.model.NodeConfig
 import com.xlink.android.ui.component.*
 import com.xlink.android.ui.theme.XlinkColors
-import com.xlink.android.util.ClipboardUtil
-import com.xlink.android.util.UriParser
 import com.xlink.android.viewmodel.NodeViewModel
 import com.xlink.android.vpn.VpnState
 import com.xlink.android.vpn.VpnStateHolder
@@ -48,12 +35,14 @@ fun HomeScreen(
     val nodes by nodeViewModel.nodes.collectAsStateWithLifecycle()
     val currentIndex by nodeViewModel.currentIndex.collectAsStateWithLifecycle()
     val vpnState by VpnStateHolder.vpnState.collectAsStateWithLifecycle()
+    val latencies by nodeViewModel.nodeLatencies.collectAsStateWithLifecycle()
 
     val runningNode = nodes.firstOrNull { it.isRunning }
     val isAnyRunning = runningNode != null
 
     var showRenameDialog by remember { mutableStateOf(false) }
     var renameTargetIndex by remember { mutableIntStateOf(-1) }
+    var showAddMenu by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -69,6 +58,12 @@ fun HomeScreen(
                     }
                 },
                 actions = {
+                    // 顶部一键全员测速
+                    IconButton(onClick = { nodeViewModel.pingAllNodes() }) {
+                        Icon(Icons.Filled.Bolt, contentDescription = "全部测速", tint = MaterialTheme.colorScheme.primary)
+                    }
+
+                    // 主开关
                     IconButton(
                         onClick = {
                             if (isAnyRunning) {
@@ -97,6 +92,31 @@ fun HomeScreen(
                     }
                 }
             )
+        },
+        floatingActionButton = {
+            Box {
+                FloatingActionButton(onClick = { showAddMenu = true }) {
+                    Icon(Icons.Filled.Add, contentDescription = "添加节点")
+                }
+                DropdownMenu(expanded = showAddMenu, onDismissRequest = { showAddMenu = false }) {
+                    DropdownMenuItem(
+                        text = { Text("从剪贴板导入节点") },
+                        leadingIcon = { Icon(Icons.Filled.ContentPaste, null) },
+                        onClick = {
+                            showAddMenu = false
+                            nodeViewModel.importFromClipboard(context)
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("手动新建空白节点") },
+                        leadingIcon = { Icon(Icons.Filled.Add, null) },
+                        onClick = {
+                            showAddMenu = false
+                            nodeViewModel.addNewNode()
+                        }
+                    )
+                }
+            }
         }
     ) { paddingValues ->
         Column(
@@ -116,6 +136,7 @@ fun HomeScreen(
                     NodeCard(
                         node = node,
                         isSelected = (index == currentIndex),
+                        latencyMs = latencies[node.id],
                         onClick = { nodeViewModel.switchNode(index) },
                         onDoubleClick = { nodeViewModel.switchNode(index); onNavigateToEdit() },
                         onStart = {
@@ -134,7 +155,9 @@ fun HomeScreen(
                         onEdit = { nodeViewModel.switchNode(index); onNavigateToEdit() },
                         onRename = { renameTargetIndex = index; showRenameDialog = true },
                         onDelete = { nodeViewModel.deleteNode(index) },
-                        onClone = { nodeViewModel.cloneNode(index) }
+                        onClone = { nodeViewModel.cloneNode(index) },
+                        onExport = { nodeViewModel.exportNode(context, node) },
+                        onPing = { nodeViewModel.pingNode(node) }
                     )
                 }
             }
